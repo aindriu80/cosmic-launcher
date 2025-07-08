@@ -4,8 +4,8 @@ use cosmic::app::{Core, CosmicFlags, Settings, Task};
 use cosmic::cctk::sctk;
 use cosmic::dbus_activation::Details;
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::event::wayland::OverlapNotifyEvent;
 use cosmic::iced::event::Status;
+use cosmic::iced::event::wayland::OverlapNotifyEvent;
 use cosmic::iced::id::Id;
 use cosmic::iced::platform_specific::runtime::wayland::{
     layer_surface::SctkLayerSurfaceSettings,
@@ -14,15 +14,15 @@ use cosmic::iced::platform_specific::runtime::wayland::{
 use cosmic::iced::platform_specific::shell::commands::{
     self,
     activation::request_token,
-    layer_surface::{destroy_layer_surface, get_layer_surface, Anchor, KeyboardInteractivity},
+    layer_surface::{Anchor, KeyboardInteractivity, destroy_layer_surface, get_layer_surface},
 };
-use cosmic::iced::widget::{column, container, Column};
+use cosmic::iced::widget::{Column, column, container};
 use cosmic::iced::{self, Length, Size, Subscription};
 use cosmic::iced_core::keyboard::key::Named;
 use cosmic::iced_core::widget::operation;
-use cosmic::iced_core::{window, Border, Padding, Point, Rectangle, Shadow};
+use cosmic::iced_core::{Border, Padding, Point, Rectangle, Shadow, window};
 use cosmic::iced_runtime::core::event::wayland::LayerEvent;
-use cosmic::iced_runtime::core::event::{wayland, PlatformSpecific};
+use cosmic::iced_runtime::core::event::{PlatformSpecific, wayland};
 use cosmic::iced_runtime::core::layout::Limits;
 use cosmic::iced_runtime::core::window::{Event as WindowEvent, Id as SurfaceId};
 use cosmic::iced_runtime::platform_specific::wayland::layer_surface::IcedMargin;
@@ -30,15 +30,15 @@ use cosmic::iced_widget::row;
 use cosmic::iced_widget::scrollable::RelativeOffset;
 use cosmic::iced_winit::commands::overlap_notify::overlap_notify;
 use cosmic::theme::{self, Button, Container};
-use cosmic::widget::icon::{from_name, IconFallback};
+use cosmic::widget::icon::{IconFallback, from_name};
 use cosmic::widget::id_container;
 use cosmic::widget::{
     autosize, button, divider, horizontal_space, icon, mouse_area, scrollable, text,
     text_input::{self, StyleSheet as TextInputStyleSheet},
     vertical_space,
 };
+use cosmic::{Element, keyboard_nav};
 use cosmic::{iced_runtime, surface};
-use cosmic::{keyboard_nav, Element};
 use iced::keyboard::Key;
 use iced::{Alignment, Color};
 use pop_launcher::{ContextOption, GpuPreference, IconSource, SearchResult};
@@ -118,7 +118,7 @@ pub fn run() -> cosmic::iced::Result {
     )
 }
 
-pub fn menu_button<'a, Message>(
+pub fn menu_button<'a, Message: Clone + 'a>(
     content: impl Into<Element<'a, Message>>,
 ) -> cosmic::widget::Button<'a, Message> {
     button::custom(content)
@@ -176,7 +176,7 @@ pub enum Message {
     LauncherEvent(launcher::Event),
     Layer(LayerEvent),
     KeyboardNav(keyboard_nav::Action),
-    ActivationToken(Option<String>, String, String, GpuPreference),
+    ActivationToken(Option<String>, String, String, GpuPreference, bool),
     AltTab,
     ShiftAltTab,
     Opened(Size, window::Id),
@@ -271,7 +271,13 @@ impl CosmicLauncher {
     }
 }
 
-async fn launch(token: Option<String>, app_id: String, exec: String, gpu: GpuPreference) {
+async fn launch(
+    token: Option<String>,
+    app_id: String,
+    exec: String,
+    gpu: GpuPreference,
+    terminal: bool,
+) {
     let mut envs = Vec::new();
     if let Some(token) = token {
         envs.push(("XDG_ACTIVATION_TOKEN".to_string(), token.clone()));
@@ -282,7 +288,7 @@ async fn launch(token: Option<String>, app_id: String, exec: String, gpu: GpuPre
         envs.extend(gpu_envs);
     }
 
-    cosmic::desktop::spawn_desktop_exec(exec, envs, Some(&app_id)).await;
+    cosmic::desktop::spawn_desktop_exec(exec, envs, Some(&app_id), terminal).await;
 }
 
 async fn try_get_gpu_envs(gpu: GpuPreference) -> Option<HashMap<String, String>> {
@@ -455,7 +461,7 @@ impl cosmic::Application for CosmicLauncher {
                         gpu_preference,
                         action_name,
                     } => {
-                        if let Some(entry) = cosmic::desktop::load_desktop_file(None, path) {
+                        if let Some(entry) = cosmic::desktop::load_desktop_file(&[], path) {
                             let exec = if let Some(action_name) = action_name {
                                 entry
                                     .desktop_actions
@@ -479,6 +485,7 @@ impl cosmic::Application for CosmicLauncher {
                                     entry.id.to_string(),
                                     exec.clone(),
                                     gpu_preference,
+                                    entry.terminal,
                                 ))
                             });
                         }
@@ -486,6 +493,9 @@ impl cosmic::Application for CosmicLauncher {
                     pop_launcher::Response::Update(mut list) => {
                         if self.alt_tab && list.is_empty() {
                             return self.hide();
+                        }
+                        if self.alt_tab || self.input_value.is_empty() {
+                            list.reverse();
                         }
                         list.sort_by(|a, b| {
                             let a = i32::from(a.window.is_none());
@@ -593,8 +603,8 @@ impl cosmic::Application for CosmicLauncher {
                     _ => {}
                 };
             }
-            Message::ActivationToken(token, app_id, exec, dgpu) => {
-                return Task::perform(launch(token, app_id, exec, dgpu), |()| {
+            Message::ActivationToken(token, app_id, exec, dgpu, terminal) => {
+                return Task::perform(launch(token, app_id, exec, dgpu, terminal), |()| {
                     cosmic::action::app(Message::Hide)
                 });
             }
@@ -626,9 +636,9 @@ impl cosmic::Application for CosmicLauncher {
                 }
             }
             Message::Surface(a) => {
-                return cosmic::task::message(cosmic::Action::Cosmic(cosmic::app::Action::Surface(
-                    a,
-                )))
+                return cosmic::task::message(cosmic::Action::Cosmic(
+                    cosmic::app::Action::Surface(a),
+                ));
             }
         }
         Task::none()
@@ -699,6 +709,7 @@ impl cosmic::Application for CosmicLauncher {
                 .on_input(Message::InputChanged)
                 .on_paste(Message::InputChanged)
                 .on_submit(|_| Message::Activate(None))
+                .on_tab(Message::TabPress)
                 .style(cosmic::theme::TextInput::Custom {
                     active: Box::new(|theme| theme.focused(&cosmic::theme::TextInput::Search)),
                     error: Box::new(|theme| theme.focused(&cosmic::theme::TextInput::Search)),
@@ -1012,7 +1023,7 @@ impl cosmic::Application for CosmicLauncher {
                         Some(Message::KeyboardNav(keyboard_nav::Action::FocusNext))
                     }
                     Key::Character(c) if modifiers.control() => {
-                        let nums = (0..10)
+                        let nums = (1..10)
                             .map(|n| (n.to_string(), ((n + 10) % 10) - 1))
                             .collect::<Vec<_>>();
                         nums.iter()
